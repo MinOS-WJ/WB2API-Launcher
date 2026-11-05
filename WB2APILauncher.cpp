@@ -5,6 +5,8 @@
 #define _UNICODE
 #endif
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -17,6 +19,7 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 #include <atomic>
 #include <memory>
@@ -26,36 +29,42 @@
 
 namespace
 {
-    constexpr COLORREF kBrand     = RGB(0xE8, 0x3E, 0x4E);
-    constexpr COLORREF kBrandDark = RGB(0xC4, 0x2A, 0x3A);
-    constexpr COLORREF kAccent    = RGB(0x2B, 0x6C, 0xE0);  // 次要操作蓝
-    constexpr COLORREF kBg        = RGB(0xF4, 0xF6, 0xF8);
-    constexpr COLORREF kCard      = RGB(0xFF, 0xFF, 0xFF);
-    constexpr COLORREF kText      = RGB(0x1A, 0x20, 0x24);
-    constexpr COLORREF kSubText   = RGB(0x6B, 0x74, 0x7C);
-    constexpr COLORREF kBorder    = RGB(0xE2, 0xE6, 0xEA);
+    // ---------- 配色（参考软件界面设计.svg） ----------
+    constexpr COLORREF kBg       = RGB(0xE9, 0xEB, 0xEE);
+    constexpr COLORREF kHeader   = RGB(0xF8, 0xF9, 0xFB);
+    constexpr COLORREF kText     = RGB(0x1A, 0x20, 0x24);
+    constexpr COLORREF kSubText  = RGB(0x6B, 0x74, 0x7C);
+    constexpr COLORREF kBorder   = RGB(0xDD, 0xE1, 0xE6);
+    constexpr COLORREF kDisabled = RGB(0xE2, 0xE5, 0xE9);
+    constexpr COLORREF kDisText  = RGB(0x9A, 0xA2, 0xAB);
+
+    constexpr COLORREF kLinkBg   = RGB(0xFF, 0xE1, 0xE1);
+    constexpr COLORREF kLinkBgHv = RGB(0xFF, 0xCF, 0xCF);
+    constexpr COLORREF kLinkText = RGB(0xC0, 0x39, 0x2B);
 
     constexpr wchar_t kWindowClassName[] = L"WB2API.Launcher.Window";
     constexpr wchar_t kProjectUrl[] = L"https://github.com/ardeyouxipianyi/workbuddy2api-hub";
+    constexpr wchar_t kDashboardUrl[] = L"http://localhost:8788";
+    constexpr WORD kServicePort = 8788;
 
-    constexpr int kButtonImport = 1004;
-    constexpr int kButtonGoto   = 1005;
+    constexpr int kButtonImport  = 1004;
+    constexpr int kButtonGoto    = 1005;
+    constexpr int kButtonOpenDir = 1006;
     constexpr int kStatusControl = 2001;
     constexpr int kProgressBar   = 2002;
     constexpr int kPathControl   = 2003;
-    constexpr int kHeaderText    = 2004;
 
-    constexpr UINT WM_IMPORT_DONE = WM_APP + 1;
-
-    // 按钮类型：primary=品牌红主操作, secondary=次要, link=头部链接
-    enum class BtnKind { Primary, Secondary, Link };
+    constexpr UINT WM_IMPORT_DONE     = WM_APP + 1;
+    constexpr UINT WM_SERVICE_WATCHED = WM_APP + 2;
 
     struct Action
     {
         const wchar_t* label;
         const wchar_t* sub;
-        const wchar_t* fileName;   // 为 nullptr 表示特殊动作
-        BtnKind kind;
+        const wchar_t* fileName;
+        bool openDashboard;
+        COLORREF base;
+        bool darkText;
         int id;
         HWND button = nullptr;
     };
@@ -65,7 +74,7 @@ namespace
     HWND g_status = nullptr;
     HWND g_progress = nullptr;
     HICON g_appIcon = nullptr;
-    HICON g_appIconSm = nullptr;
+    HICON g_appIcon48 = nullptr;
     int g_dpi = 96;
 
     std::wstring g_exeDirectory;
@@ -77,19 +86,15 @@ namespace
     HFONT g_fontBtnSub = nullptr;
     HFONT g_fontSmall = nullptr;
     HBRUSH g_brBg = nullptr;
-    HBRUSH g_brCard = nullptr;
+    HBRUSH g_brHeader = nullptr;
 
-    // 启动类按钮（主操作，占主区域）
-    std::vector<Action> g_startActions = {
-        {L"本地启动",       L"仅本机访问 · 推荐",       L"start-wb-proxy.bat",                 BtnKind::Primary,   1101},
-        {L"本地·可见窗口",  L"前台控制台便于看日志",     L"start-wb-proxy-visible.bat",         BtnKind::Secondary, 1102},
-        {L"局域网启动",     L"允许局域网设备访问",       L"start-wb-proxy-lan.bat",             BtnKind::Primary,   1103},
-        {L"局域网·可见窗口",L"共享模式 + 前台日志",      L"start-wb-proxy-lan-visible.bat",     BtnKind::Secondary, 1104},
-    };
-    // 维护类按钮（次要操作）
-    std::vector<Action> g_maintainActions = {
-        {L"重启服务",   L"停止后重新启动代理",   L"restart-wb-proxy.bat",  BtnKind::Secondary, 1201},
-        {L"防火墙放行", L"允许局域网端口通过",   L"allow-firewall.bat",     BtnKind::Secondary, 1202},
+    std::vector<Action> g_actions = {
+        {L"本地启动",        L"仅本机访问 · 推荐",    L"start-wb-proxy.bat",             true,  RGB(0xF5,0x37,0x3C), false, 1101},
+        {L"局域网启动",      L"允许局域网设备访问",   L"start-wb-proxy-lan.bat",         true,  RGB(0x18,0x9A,0x4A), false, 1102},
+        {L"本地·可见窗口",   L"前台控制台看日志",     L"start-wb-proxy-visible.bat",     true,  RGB(0xFF,0xC4,0x00), true,  1103},
+        {L"局域网·可见窗口", L"共享模式 + 前台日志",  L"start-wb-proxy-lan-visible.bat", true,  RGB(0x0F,0xA6,0xCE), false, 1104},
+        {L"重启服务",        L"停止后重新启动代理",   L"restart-wb-proxy.bat",           true,  RGB(0x2E,0x5B,0xFF), false, 1105},
+        {L"防火墙放行",      L"允许局域网端口通过",   L"allow-firewall.bat",             false, RGB(0xC8,0x40,0xD8), false, 1106},
     };
 
     int Scale(int v) { return MulDiv(v, g_dpi, 96); }
@@ -146,10 +151,9 @@ namespace
         return IsRegularFile(g_wbProxyDirectory + L"\\" + a.fileName);
     }
 
-    bool WbProxyReady()
+    bool CoreScriptReady()
     {
-        // 只要核心启动脚本存在即认为就绪
-        return ScriptExists(g_startActions[0]);
+        return IsRegularFile(g_wbProxyDirectory + L"\\start-wb-proxy.bat");
     }
 
     void SetStatus(const std::wstring& text)
@@ -168,6 +172,21 @@ namespace
         DeleteObject(br); DeleteObject(pen);
     }
 
+    COLORREF Tint(COLORREF c, int amount)
+    {
+        int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+        if (amount >= 0) {
+            r += (255 - r) * amount / 255;
+            g += (255 - g) * amount / 255;
+            b += (255 - b) * amount / 255;
+        } else {
+            r = r * (255 + amount) / 255;
+            g = g * (255 + amount) / 255;
+            b = b * (255 + amount) / 255;
+        }
+        return RGB(r, g, b);
+    }
+
     HFONT MakeFont(int pt, int weight)
     {
         int h = -MulDiv(pt, g_dpi, 72);
@@ -183,11 +202,11 @@ namespace
     void CreateFontsAndBrushes()
     {
         g_fontTitle = MakeFont(15, FW_BOLD);
-        g_fontBtn = MakeFont(12, FW_SEMIBOLD);
+        g_fontBtn = MakeFont(13, FW_SEMIBOLD);
         g_fontBtnSub = MakeFont(9, FW_NORMAL);
         g_fontSmall = MakeFont(9, FW_NORMAL);
         g_brBg = CreateSolidBrush(kBg);
-        g_brCard = CreateSolidBrush(kCard);
+        g_brHeader = CreateSolidBrush(kHeader);
     }
 
     void DestroyFontsAndBrushes()
@@ -195,28 +214,26 @@ namespace
         for (HFONT f : {g_fontTitle, g_fontBtn, g_fontBtnSub, g_fontSmall})
             if (f) DeleteObject(f);
         if (g_brBg) DeleteObject(g_brBg);
-        if (g_brCard) DeleteObject(g_brCard);
+        if (g_brHeader) DeleteObject(g_brHeader);
         g_fontTitle = g_fontBtn = g_fontBtnSub = g_fontSmall = nullptr;
-        g_brBg = g_brCard = nullptr;
+        g_brBg = g_brHeader = nullptr;
     }
 
     void RefreshAllButtons()
     {
-        auto refresh = [](std::vector<Action>& v) {
-            for (Action& a : v)
-            {
-                EnableWindow(a.button, (ScriptExists(a) && !g_busy) ? TRUE : FALSE);
-                InvalidateRect(a.button, nullptr, TRUE);
-            }
-        };
-        refresh(g_startActions);
-        refresh(g_maintainActions);
-        HWND imp = GetDlgItem(g_window, kButtonImport);
-        if (imp) { EnableWindow(imp, g_busy ? FALSE : TRUE); InvalidateRect(imp, nullptr, TRUE); }
+        for (Action& a : g_actions)
+        {
+            EnableWindow(a.button, (ScriptExists(a) && !g_busy) ? TRUE : FALSE);
+            InvalidateRect(a.button, nullptr, TRUE);
+        }
+        for (int id : {kButtonImport, kButtonGoto, kButtonOpenDir})
+        {
+            HWND b = GetDlgItem(g_window, id);
+            if (b) { EnableWindow(b, g_busy ? FALSE : TRUE); InvalidateRect(b, nullptr, TRUE); }
+        }
         if (g_progress) ShowWindow(g_progress, g_busy ? SW_SHOW : SW_HIDE);
     }
 
-    // ---------- 启动 bat ----------
     bool LaunchBatchFile(const Action& action)
     {
         const std::wstring scriptPath = g_wbProxyDirectory + L"\\" + action.fileName;
@@ -224,16 +241,15 @@ namespace
         {
             const std::wstring msg = L"未找到脚本：\n" + scriptPath;
             SetStatus(msg);
-            MessageBoxW(g_window, msg.c_str(), L"无法启动", MB_OK | MB_ICONERROR);
+            MessageBoxW(g_window, msg.c_str(), L"无法启动", MB_OK | MB_ICONSTOP);
             return false;
         }
         wchar_t sysDir[MAX_PATH] = {};
         const UINT sysLen = GetSystemDirectoryW(sysDir, static_cast<UINT>(_countof(sysDir)));
         if (sysLen == 0 || sysLen >= _countof(sysDir))
         {
-            const std::wstring msg = L"无法定位 cmd.exe。";
-            SetStatus(msg);
-            MessageBoxW(g_window, msg.c_str(), L"无法启动", MB_OK | MB_ICONERROR);
+            SetStatus(L"无法定位 cmd.exe。");
+            MessageBoxW(g_window, L"无法定位 cmd.exe。", L"无法启动", MB_OK | MB_ICONSTOP);
             return false;
         }
         const std::wstring cmdExe = std::wstring(sysDir, sysLen) + L"\\cmd.exe";
@@ -251,15 +267,46 @@ namespace
             const std::wstring msg = L"无法启动：\n" + scriptPath + L"\n\n错误 " +
                 std::to_wstring(err) + L": " + GetLastErrorText(err);
             SetStatus(msg);
-            MessageBoxW(g_window, msg.c_str(), L"无法启动", MB_OK | MB_ICONERROR);
+            MessageBoxW(g_window, msg.c_str(), L"无法启动", MB_OK | MB_ICONSTOP);
             return false;
         }
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-        SetStatus(L"已启动：" + std::wstring(action.label));
         return true;
     }
 
-    // ---------- 解压 ZIP ----------
+    bool IsServicePortOpen()
+    {
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) return false;
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(kServicePort);
+        inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+        const int r = connect(s, reinterpret_cast<sockaddr*>(&sa), sizeof(sa));
+        closesocket(s);
+        return r == 0;
+    }
+
+    void ServiceWatchProc()
+    {
+        bool ok = false;
+        for (int i = 0; i < 40; ++i)
+        {
+            Sleep(500);
+            if (IsServicePortOpen()) { ok = true; break; }
+        }
+        PostMessageW(g_window, WM_SERVICE_WATCHED, ok ? 1 : 0, 0);
+    }
+
+    void StartServiceWatch()
+    {
+        if (g_busy.exchange(true)) return;
+        RefreshAllButtons();
+        SetStatus(L"服务启动中，正在等待端口 8788 就绪…");
+        if (g_progress) SendMessageW(g_progress, PBM_SETMARQUEE, TRUE, 40);
+        std::thread(ServiceWatchProc).detach();
+    }
+
     bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir,
                     std::wstring& errorOut)
     {
@@ -275,8 +322,8 @@ namespace
         DWORD exitCode = 1; GetExitCodeProcess(pi.hProcess, &exitCode);
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
         if (exitCode != 0)
-        { errorOut = L"解压失败，tar 退出码 " + std::to_wstring(exitCode) +
-                     L"。\n请确认选择的是有效的 ZIP 压缩包。"; return false; }
+        { errorOut = L"解压失败（tar 退出码 " + std::to_wstring(exitCode) +
+                     L"），请确认选择的是有效的 ZIP 压缩包。"; return false; }
         return true;
     }
 
@@ -285,7 +332,7 @@ namespace
         std::wstring err; bool ok = false;
         if (ExtractZip(zipPath, g_exeDirectory, err))
         {
-            ok = WbProxyReady();
+            ok = CoreScriptReady();
             if (!ok)
                 err = L"解压完成，但未检测到 wb-proxy 启动脚本。\n"
                       L"请确认选择的是 workbuddy2api-hub 官方压缩包。";
@@ -310,12 +357,11 @@ namespace
         if (!GetOpenFileNameW(&ofn)) return;
         g_busy = true;
         RefreshAllButtons();
-        SetStatus(L"正在解压导入...");
-        if (g_progress) SendMessageW(g_progress, PBM_SETMARQUEE, TRUE, 50);
+        SetStatus(L"正在解压导入…");
+        if (g_progress) SendMessageW(g_progress, PBM_SETMARQUEE, TRUE, 40);
         std::thread(ImportThreadProc, std::wstring(filePath)).detach();
     }
 
-    // ---------- 布局 ----------
     void LayoutControls(HWND window)
     {
         RECT rc{}; GetClientRect(window, &rc);
@@ -324,55 +370,48 @@ namespace
         const int m = Scale(22);
         const int cw = width - m * 2;
 
-        // 头部
-        HWND title = GetDlgItem(window, 3001);
-        if (title) MoveWindow(title, m + Scale(60), Scale(20), cw - Scale(60) - Scale(180), Scale(26), TRUE);
-        HWND path = GetDlgItem(window, kPathControl);
-        if (path) MoveWindow(path, m + Scale(60), Scale(48), cw - Scale(60) - Scale(180), Scale(18), TRUE);
+        const int headH = Scale(72);
+        SetWindowPos(GetDlgItem(window, 3001), nullptr,
+            m + Scale(60), Scale(14), cw - Scale(60), Scale(28),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(GetDlgItem(window, kPathControl), nullptr,
+            m + Scale(60), Scale(44), cw - Scale(60), Scale(18),
+            SWP_NOZORDER | SWP_NOACTIVATE);
 
-        // 头部右侧：导入 + 前往下载 小链接
-        const int linkW = Scale(82);
-        const int linkGap = Scale(6);
-        const int linkTop = Scale(28);
-        HWND go = GetDlgItem(window, kButtonGoto);
-        if (go) MoveWindow(go, rc.right - m - linkW, linkTop, linkW, Scale(24), TRUE);
-        HWND imp = GetDlgItem(window, kButtonImport);
-        if (imp) MoveWindow(imp, rc.right - m - linkW * 2 - linkGap, linkTop, linkW, Scale(24), TRUE);
-
-        const int headH = Scale(84);
-        const int statusH = Scale(38);
-        const int contentTop = headH + Scale(14);
-        const int contentBottom = height - statusH - Scale(10);
-        const int gap = Scale(12);
-
-        // 启动区：4 个按钮 2x2 网格（占主要面积）
-        const int startRows = 2, startCols = 2;
-        const int startBtnW = (cw - gap) / startCols;
-        const int startBtnH = ((contentBottom - contentTop) * 2 / 3 - gap) / startRows;
-        for (size_t i = 0; i < g_startActions.size(); ++i)
+        const int gridTop = headH + Scale(16);
+        const int gap = Scale(14);
+        const int pillW = (cw - gap) / 2;
+        const int pillH = Scale(86);
+        for (size_t i = 0; i < g_actions.size(); ++i)
         {
-            const int col = (int)(i % startCols);
-            const int row = (int)(i / startCols);
-            const int left = m + col * (startBtnW + gap);
-            const int top = contentTop + row * (startBtnH + gap);
-            MoveWindow(g_startActions[i].button, left, top, startBtnW, startBtnH, TRUE);
+            const int col = (int)(i % 2);
+            const int row = (int)(i / 2);
+            MoveWindow(g_actions[i].button,
+                m + col * (pillW + gap), gridTop + row * (pillH + gap),
+                pillW, pillH, TRUE);
+        }
+        const int gridBottom = gridTop + 3 * pillH + 2 * gap;
+
+        if (g_progress)
+            MoveWindow(g_progress, m, gridBottom + Scale(10), cw, Scale(8), TRUE);
+
+        const int linkW = Scale(100);
+        const int linkH = Scale(28);
+        const int linkGap = Scale(14);
+        const int linksTotal = 3 * linkW + 2 * linkGap;
+        const int linkY = gridBottom + Scale(26);
+        for (int i = 0; i < 3; ++i)
+        {
+            const int id = (i == 0) ? kButtonImport
+                         : (i == 1) ? kButtonGoto : kButtonOpenDir;
+            HWND b = GetDlgItem(window, id);
+            if (b) MoveWindow(b, m + (cw - linksTotal) / 2 + i * (linkW + linkGap),
+                              linkY, linkW, linkH, TRUE);
         }
 
-        // 维护区：2 个按钮一行（底部，较矮）
-        const int maintTop = contentTop + startRows * (startBtnH + gap) + Scale(4);
-        const int maintBtnW = (cw - gap) / 2;
-        const int maintBtnH = contentBottom - maintTop;
-        for (size_t i = 0; i < g_maintainActions.size(); ++i)
-        {
-            const int left = m + (int)i * (maintBtnW + gap);
-            MoveWindow(g_maintainActions[i].button, left, maintTop, maintBtnW, maintBtnH, TRUE);
-        }
-
-        // 进度条
-        if (g_progress) MoveWindow(g_progress, m, contentBottom - Scale(2), cw, Scale(6), TRUE);
-
-        // 状态栏
-        if (g_status) MoveWindow(g_status, m, height - statusH, cw, Scale(22), TRUE);
+        const int stH = Scale(20);
+        if (g_status)
+            MoveWindow(g_status, m, height - stH - Scale(10), cw, stH, TRUE);
     }
 
     HWND Mk(const wchar_t* cls, const wchar_t* text, DWORD style, int id, HWND parent)
@@ -382,17 +421,14 @@ namespace
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
     }
 
-    // 通过 HWND 找 Action
-    Action* FindAction(HWND btn)
-    {
-        for (auto& a : g_startActions) if (a.button == btn) return &a;
-        for (auto& a : g_maintainActions) if (a.button == btn) return &a;
-        return nullptr;
-    }
     Action* FindActionById(int id)
     {
-        for (auto& a : g_startActions) if (a.id == id) return &a;
-        for (auto& a : g_maintainActions) if (a.id == id) return &a;
+        for (auto& a : g_actions) if (a.id == id) return &a;
+        return nullptr;
+    }
+    Action* FindActionByHwnd(HWND h)
+    {
+        for (auto& a : g_actions) if (a.button == h) return &a;
         return nullptr;
     }
 
@@ -403,18 +439,17 @@ namespace
         const bool hover = (dis->itemState & ODS_HOTLIGHT) != 0;
         const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
         const RECT rc = dis->rcItem;
-
         SetBkMode(dis->hDC, TRANSPARENT);
 
-        // 头部小链接
-        if (id == kButtonImport || id == kButtonGoto)
+        if (id == kButtonImport || id == kButtonGoto || id == kButtonOpenDir)
         {
-            const wchar_t* text = (id == kButtonImport) ? L"导入 ZIP" : L"前往下载";
-            const int radius = Scale(12);
-            if (!disabled && (hover || pressed))
-                FillRoundRect(dis->hDC, rc, radius,
-                    pressed ? RGB(0xEC, 0xF1, 0xF4) : RGB(0xF0, 0xF2, 0xF5));
-            SetTextColor(dis->hDC, disabled ? kSubText : kBrand);
+            const wchar_t* text = (id == kButtonImport) ? L"导入 ZIP 初始化"
+                                : (id == kButtonGoto)   ? L"前往下载"
+                                                        : L"打开目录";
+            FillRoundRect(dis->hDC, rc, rc.bottom - rc.top,
+                disabled ? kDisabled : (pressed ? Tint(kLinkBg, -15)
+                                                : hover ? kLinkBgHv : kLinkBg));
+            SetTextColor(dis->hDC, disabled ? kDisText : kLinkText);
             HFONT old = (HFONT)SelectObject(dis->hDC, g_fontSmall);
             RECT tr = rc;
             DrawTextW(dis->hDC, text, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -422,53 +457,31 @@ namespace
             return;
         }
 
-        Action* a = FindAction(dis->hwndItem);
+        Action* a = FindActionByHwnd(dis->hwndItem);
         if (!a) return;
+        const int radius = (rc.bottom - rc.top) / 2;
 
-        const bool isPrimary = (a->kind == BtnKind::Primary);
-        const int radius = Scale(14);
+        COLORREF fill = kDisabled;
+        if (!disabled)
+            fill = pressed ? Tint(a->base, -42) : hover ? Tint(a->base, 34) : a->base;
+        FillRoundRect(dis->hDC, rc, radius, fill);
 
-        COLORREF bg;
-        if (disabled) bg = RGB(0xE9, 0xEC, 0xEF);
-        else if (isPrimary) bg = pressed ? kBrandDark : (hover ? RGB(0xF0, 0x5A, 0x68) : kBrand);
-        else bg = pressed ? RGB(0xE4, 0xE9, 0xEE) : (hover ? RGB(0xF0, 0xF4, 0xF8) : kCard);
-        FillRoundRect(dis->hDC, rc, radius, bg);
-
-        if (!isPrimary)
-        {
-            HPEN pen = CreatePen(PS_SOLID, Scale(1),
-                disabled ? kBorder : (hover ? kAccent : kBorder));
-            HBRUSH oldBr = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-            HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
-            RoundRect(dis->hDC, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-            SelectObject(dis->hDC, oldBr); SelectObject(dis->hDC, oldPen);
-            DeleteObject(pen);
-        }
-
-        const int btnH = rc.bottom - rc.top;
-        const bool tall = btnH > Scale(70);   // 启动大卡显示标题+副标题，维护小卡只显示标题
-
-        const COLORREF main = disabled ? kSubText
-            : (isPrimary ? RGB(255, 255, 255) : kText);
-        const COLORREF sub = disabled ? kSubText
-            : (isPrimary ? RGB(255, 228, 232) : kSubText);
+        const int h = rc.bottom - rc.top;
+        const COLORREF mainText = disabled ? kDisText
+                                : (a->darkText ? RGB(0x4A, 0x3A, 0x00) : RGB(255, 255, 255));
+        const COLORREF subText = disabled ? kDisText
+                               : (a->darkText ? RGB(0x6B, 0x57, 0x10)
+                                              : RGB(255, 255, 255));
 
         HFONT old = (HFONT)SelectObject(dis->hDC, g_fontBtn);
-        SetTextColor(dis->hDC, main);
-        if (tall)
-        {
-            RECT tr = rc; tr.top += (btnH - Scale(44)) / 2; tr.left += Scale(8); tr.right -= Scale(8);
-            DrawTextW(dis->hDC, a->label, -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
-            SelectObject(dis->hDC, g_fontBtnSub);
-            SetTextColor(dis->hDC, sub);
-            RECT sr = rc; sr.top = tr.top + Scale(26); sr.left += Scale(8); sr.right -= Scale(8);
-            DrawTextW(dis->hDC, a->sub, -1, &sr, DT_CENTER | DT_TOP | DT_SINGLELINE);
-        }
-        else
-        {
-            RECT tr = rc; tr.top += Scale(2);
-            DrawTextW(dis->hDC, a->label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
+        SetTextColor(dis->hDC, mainText);
+        RECT tr = rc; tr.top += h * 22 / 100; tr.left += Scale(10); tr.right -= Scale(10);
+        DrawTextW(dis->hDC, a->label, -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+
+        SelectObject(dis->hDC, g_fontBtnSub);
+        SetTextColor(dis->hDC, subText);
+        RECT sr = rc; sr.top += h * 54 / 100; sr.left += Scale(10); sr.right -= Scale(10);
+        DrawTextW(dis->hDC, a->sub, -1, &sr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         SelectObject(dis->hDC, old);
     }
 
@@ -489,19 +502,18 @@ namespace
                 SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, kPathControl, window);
             SendMessageW(p, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
 
-            for (auto& a : g_startActions)
-                a.button = Mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, a.id, window);
-            for (auto& a : g_maintainActions)
+            for (auto& a : g_actions)
                 a.button = Mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, a.id, window);
 
             Mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, kButtonImport, window);
             Mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, kButtonGoto, window);
+            Mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, kButtonOpenDir, window);
 
             g_progress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
                 WS_CHILD | PBS_SMOOTH | PBS_MARQUEE, 0, 0, 0, 0, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProgressBar)),
                 g_instance, nullptr);
-            SendMessageW(g_progress, PBM_SETBARCOLOR, 0, kBrand);
+            SendMessageW(g_progress, PBM_SETBARCOLOR, 0, RGB(0xF5, 0x37, 0x3C));
             SendMessageW(g_progress, PBM_SETBKCOLOR, 0, kBorder);
             ShowWindow(g_progress, SW_HIDE);
 
@@ -509,8 +521,8 @@ namespace
             SendMessageW(g_status, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
 
             RefreshAllButtons();
-            if (!WbProxyReady())
-                SetStatus(L"未检测到 wb-proxy，点右上角「导入 ZIP」初始化");
+            if (!CoreScriptReady())
+                SetStatus(L"未检测到 wb-proxy，请先点击下方「导入 ZIP 初始化」");
             LayoutControls(window);
             return 0;
         }
@@ -527,15 +539,16 @@ namespace
         {
             PAINTSTRUCT ps; HDC dc = BeginPaint(window, &ps);
             RECT rc; GetClientRect(window, &rc);
-            RECT head = rc; head.bottom = Scale(84);
-            FillRect(dc, &head, g_brCard);
-            if (g_appIconSm)
-                DrawIconEx(dc, Scale(22), Scale(20), g_appIconSm,
-                    Scale(40), Scale(40), 0, nullptr, DI_NORMAL);
+            const int headH = Scale(72);
+            RECT head = rc; head.bottom = headH;
+            FillRect(dc, &head, g_brHeader);
+            if (g_appIcon48)
+                DrawIconEx(dc, Scale(20), Scale(14), g_appIcon48,
+                    Scale(44), Scale(44), 0, nullptr, DI_NORMAL);
             HPEN pen = CreatePen(PS_SOLID, Scale(1), kBorder);
             HPEN oldPen = (HPEN)SelectObject(dc, pen);
-            MoveToEx(dc, 0, head.bottom, nullptr);
-            LineTo(dc, rc.right, head.bottom);
+            MoveToEx(dc, 0, headH, nullptr);
+            LineTo(dc, rc.right, headH);
             SelectObject(dc, oldPen); DeleteObject(pen);
             EndPaint(window, &ps);
             return 0;
@@ -546,8 +559,8 @@ namespace
             HDC dc = (HDC)wParam; HWND ctl = (HWND)lParam;
             SetBkMode(dc, TRANSPARENT);
             const int id = GetDlgCtrlID(ctl);
-            if (id == 3001) { SetTextColor(dc, kText); return (LRESULT)g_brCard; }
-            if (id == kPathControl) { SetTextColor(dc, kSubText); return (LRESULT)g_brCard; }
+            if (id == 3001) { SetTextColor(dc, kText); return (LRESULT)g_brHeader; }
+            if (id == kPathControl) { SetTextColor(dc, kSubText); return (LRESULT)g_brHeader; }
             SetTextColor(dc, kSubText);
             return (LRESULT)g_brBg;
         }
@@ -561,8 +574,8 @@ namespace
         case WM_GETMINMAXINFO:
         {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-            mmi->ptMinTrackSize.x = Scale(640);
-            mmi->ptMinTrackSize.y = Scale(480);
+            mmi->ptMinTrackSize.x = Scale(620);
+            mmi->ptMinTrackSize.y = Scale(470);
             return 0;
         }
 
@@ -582,7 +595,25 @@ namespace
             {
                 const std::wstring msg = err ? *err : L"解压失败。";
                 SetStatus(msg);
-                MessageBoxW(window, msg.c_str(), L"导入失败", MB_OK | MB_ICONERROR);
+                MessageBoxW(window, msg.c_str(), L"导入失败", MB_OK | MB_ICONSTOP);
+            }
+            return 0;
+        }
+
+        case WM_SERVICE_WATCHED:
+        {
+            g_busy = false;
+            if (g_progress) SendMessageW(g_progress, PBM_SETMARQUEE, FALSE, 0);
+            RefreshAllButtons();
+            if (wParam == 1)
+            {
+                SetStatus(L"服务已就绪，正在打开管理面板…");
+                ShellExecuteW(window, L"open", kDashboardUrl, nullptr, nullptr, SW_SHOWNORMAL);
+                DestroyWindow(window);
+            }
+            else
+            {
+                SetStatus(L"等待超时：端口 8788 未就绪，请查看控制台窗口中的服务日志。");
             }
             return 0;
         }
@@ -591,15 +622,34 @@ namespace
             if (HIWORD(wParam) == BN_CLICKED)
             {
                 const int id = LOWORD(wParam);
-                if (id == kButtonImport) { StartImport(); return 0; }
-                if (id == kButtonGoto)
+                if (Action* a = FindActionById(id))
                 {
+                    if (LaunchBatchFile(*a))
+                    {
+                        if (a->openDashboard)
+                            StartServiceWatch();
+                        else
+                            SetStatus(std::wstring(L"已执行：") + a->label);
+                    }
+                    return 0;
+                }
+                switch (id)
+                {
+                case kButtonImport: StartImport(); return 0;
+                case kButtonGoto:
                     ShellExecuteW(window, L"open",
                         (std::wstring(kProjectUrl) + L"/releases").c_str(),
                         nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
+                case kButtonOpenDir:
+                {
+                    const std::wstring dir = CoreScriptReady()
+                        ? g_wbProxyDirectory : g_exeDirectory;
+                    ShellExecuteW(window, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
                 }
-                if (Action* a = FindActionById(id)) { LaunchBatchFile(*a); return 0; }
+                default: break;
+                }
             }
             break;
 
@@ -622,17 +672,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&icc);
 
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+
     g_exeDirectory = GetExecutableDirectory();
     if (g_exeDirectory.empty())
     {
-        MessageBoxW(nullptr, L"无法确定程序目录。", L"WB2API 启动器", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"无法确定程序目录。", L"WB2API 启动器", MB_OK | MB_ICONSTOP);
         return 1;
     }
     g_wbProxyDirectory = g_exeDirectory + L"\\wb-proxy";
 
     g_appIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1),
         IMAGE_ICON, 0, 0, LR_DEFAULTSIZE));
-    g_appIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1),
+    g_appIcon48 = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1),
         IMAGE_ICON, 48, 48, 0));
 
     WNDCLASSEXW wc{};
@@ -647,16 +700,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     wc.hIconSm = g_appIcon ? g_appIcon : LoadIconW(nullptr, IDI_APPLICATION);
     if (RegisterClassExW(&wc) == 0)
     {
-        MessageBoxW(nullptr, L"无法注册窗口类。", L"WB2API 启动器", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"无法注册窗口类。", L"WB2API 启动器", MB_OK | MB_ICONSTOP);
         return 1;
     }
 
     g_window = CreateWindowExW(0, kWindowClassName, L"WB2API 启动器",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, Scale(760), Scale(560),
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 660, 520,
         nullptr, nullptr, instance, nullptr);
     if (!g_window)
     {
-        MessageBoxW(nullptr, L"无法创建主窗口。", L"WB2API 启动器", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"无法创建主窗口。", L"WB2API 启动器", MB_OK | MB_ICONSTOP);
         return 1;
     }
 
@@ -669,5 +722,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    WSACleanup();
     return static_cast<int>(msg.wParam);
 }
