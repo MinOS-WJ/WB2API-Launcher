@@ -38,9 +38,10 @@ namespace
     constexpr COLORREF kDisabled = RGB(0xE2, 0xE5, 0xE9);
     constexpr COLORREF kDisText  = RGB(0x9A, 0xA2, 0xAB);
 
-    constexpr COLORREF kLinkBg   = RGB(0xFF, 0xE1, 0xE1);
-    constexpr COLORREF kLinkBgHv = RGB(0xFF, 0xCF, 0xCF);
-    constexpr COLORREF kLinkText = RGB(0xC0, 0x39, 0x2B);
+    constexpr COLORREF kLinkBg     = RGB(0xFF, 0xD9, 0xD9);
+    constexpr COLORREF kLinkBgHv   = RGB(0xFF, 0xC2, 0xC2);
+    constexpr COLORREF kLinkText   = RGB(0xB0, 0x2E, 0x24);
+    constexpr COLORREF kLinkBorder = RGB(0xE8, 0x9C, 0x9C);
 
     constexpr wchar_t kWindowClassName[] = L"WB2API.Launcher.Window";
     constexpr wchar_t kProjectUrl[] = L"https://github.com/ardeyouxipianyi/workbuddy2api-hub";
@@ -365,53 +366,57 @@ namespace
     void LayoutControls(HWND window)
     {
         RECT rc{}; GetClientRect(window, &rc);
-        const int width = rc.right - rc.left;
-        const int height = rc.bottom - rc.top;
-        const int m = Scale(22);
-        const int cw = width - m * 2;
+        const int W = rc.right - rc.left;
+        const int H = rc.bottom - rc.top;
 
-        const int headH = Scale(72);
-        SetWindowPos(GetDlgItem(window, 3001), nullptr,
-            m + Scale(60), Scale(14), cw - Scale(60), Scale(28),
-            SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(GetDlgItem(window, kPathControl), nullptr,
-            m + Scale(60), Scale(44), cw - Scale(60), Scale(18),
-            SWP_NOZORDER | SWP_NOACTIVATE);
+        // 全部按窗口比例计算，避免不同 DPI / 主题下内容被裁剪
+        const int m = W * 9 / 200;
+        const int cw = W - m * 2;
 
-        const int gridTop = headH + Scale(16);
-        const int gap = Scale(14);
-        const int pillW = (cw - gap) / 2;
-        const int pillH = Scale(86);
+        const int headH = H * 16 / 100;
+        const int textX = m + headH * 4 / 5;
+        const int textW = cw - headH * 4 / 5;
+        HWND title = GetDlgItem(window, 3001);
+        if (title) MoveWindow(title, textX, headH / 10, textW, headH * 2 / 5, TRUE);
+        HWND path = GetDlgItem(window, kPathControl);
+        if (path) MoveWindow(path, textX, headH * 14 / 25, textW, headH * 7 / 25, TRUE);
+
+        const int statusH = H * 9 / 200;
+        const int statusY = H - statusH - H * 2 / 100;
+        if (g_status) MoveWindow(g_status, m, statusY, cw, statusH, TRUE);
+
+        const int linkH = H * 11 / 200;
+        const int linkY = statusY - linkH - H * 2 / 100;
+
+        const int gridTop = headH + H * 3 / 100;
+        const int gridBottom = linkY - H * 2 / 100;
+        const int availH = gridBottom - gridTop;
+        const int vgap = H * 5 / 200;
+        const int pillH = (availH - 2 * vgap) / 3;
+        const int hgap = W * 5 / 200;
+        const int pillW = (cw - hgap) / 2;
         for (size_t i = 0; i < g_actions.size(); ++i)
         {
             const int col = (int)(i % 2);
             const int row = (int)(i / 2);
             MoveWindow(g_actions[i].button,
-                m + col * (pillW + gap), gridTop + row * (pillH + gap),
+                m + col * (pillW + hgap), gridTop + row * (pillH + vgap),
                 pillW, pillH, TRUE);
         }
-        const int gridBottom = gridTop + 3 * pillH + 2 * gap;
 
         if (g_progress)
-            MoveWindow(g_progress, m, gridBottom + Scale(10), cw, Scale(8), TRUE);
+            MoveWindow(g_progress, m, gridBottom + H * 1 / 100, cw, H * 3 / 200, TRUE);
 
-        const int linkW = Scale(100);
-        const int linkH = Scale(28);
-        const int linkGap = Scale(14);
+        const int linkW = cw * 28 / 100;
+        const int linkGap = W * 5 / 200;
         const int linksTotal = 3 * linkW + 2 * linkGap;
-        const int linkY = gridBottom + Scale(26);
+        const int linkX = m + (cw - linksTotal) / 2;
         for (int i = 0; i < 3; ++i)
         {
-            const int id = (i == 0) ? kButtonImport
-                         : (i == 1) ? kButtonGoto : kButtonOpenDir;
+            const int id = (i == 0) ? kButtonImport : (i == 1) ? kButtonGoto : kButtonOpenDir;
             HWND b = GetDlgItem(window, id);
-            if (b) MoveWindow(b, m + (cw - linksTotal) / 2 + i * (linkW + linkGap),
-                              linkY, linkW, linkH, TRUE);
+            if (b) MoveWindow(b, linkX + i * (linkW + linkGap), linkY, linkW, linkH, TRUE);
         }
-
-        const int stH = Scale(20);
-        if (g_status)
-            MoveWindow(g_status, m, height - stH - Scale(10), cw, stH, TRUE);
     }
 
     HWND Mk(const wchar_t* cls, const wchar_t* text, DWORD style, int id, HWND parent)
@@ -449,6 +454,13 @@ namespace
             FillRoundRect(dis->hDC, rc, rc.bottom - rc.top,
                 disabled ? kDisabled : (pressed ? Tint(kLinkBg, -15)
                                                 : hover ? kLinkBgHv : kLinkBg));
+            HPEN lpen = CreatePen(PS_SOLID, Scale(1), disabled ? kBorder : kLinkBorder);
+            HBRUSH loldBr = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+            HPEN loldPen = (HPEN)SelectObject(dis->hDC, lpen);
+            const int lr = rc.bottom - rc.top;
+            RoundRect(dis->hDC, rc.left, rc.top, rc.right, rc.bottom, lr, lr);
+            SelectObject(dis->hDC, loldBr); SelectObject(dis->hDC, loldPen);
+            DeleteObject(lpen);
             SetTextColor(dis->hDC, disabled ? kDisText : kLinkText);
             HFONT old = (HFONT)SelectObject(dis->hDC, g_fontSmall);
             RECT tr = rc;
@@ -539,12 +551,16 @@ namespace
         {
             PAINTSTRUCT ps; HDC dc = BeginPaint(window, &ps);
             RECT rc; GetClientRect(window, &rc);
-            const int headH = Scale(72);
+            const int W = rc.right - rc.left;
+            const int headH = (rc.bottom - rc.top) * 16 / 100;
             RECT head = rc; head.bottom = headH;
             FillRect(dc, &head, g_brHeader);
             if (g_appIcon48)
-                DrawIconEx(dc, Scale(20), Scale(14), g_appIcon48,
-                    Scale(44), Scale(44), 0, nullptr, DI_NORMAL);
+            {
+                const int logo = headH * 31 / 50;
+                DrawIconEx(dc, W * 9 / 200, (headH - logo) / 2, g_appIcon48,
+                    logo, logo, 0, nullptr, DI_NORMAL);
+            }
             HPEN pen = CreatePen(PS_SOLID, Scale(1), kBorder);
             HPEN oldPen = (HPEN)SelectObject(dc, pen);
             MoveToEx(dc, 0, headH, nullptr);
@@ -570,14 +586,6 @@ namespace
             return TRUE;
 
         case WM_SIZE: LayoutControls(window); return 0;
-
-        case WM_GETMINMAXINFO:
-        {
-            auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-            mmi->ptMinTrackSize.x = Scale(620);
-            mmi->ptMinTrackSize.y = Scale(470);
-            return 0;
-        }
 
         case WM_IMPORT_DONE:
         {
@@ -704,8 +712,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         return 1;
     }
 
+    const DWORD winStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    HDC screenDc = GetDC(nullptr);
+    const int screenDpi = GetDeviceCaps(screenDc, LOGPIXELSY);
+    ReleaseDC(nullptr, screenDc);
+    RECT wr{ 0, 0, MulDiv(640, screenDpi, 96), MulDiv(540, screenDpi, 96) };
+    AdjustWindowRectEx(&wr, winStyle, FALSE, 0);
+    const int winW = wr.right - wr.left;
+    const int winH = wr.bottom - wr.top;
+    const int winX = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
+    const int winY = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
     g_window = CreateWindowExW(0, kWindowClassName, L"WB2API 启动器",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 660, 520,
+        winStyle, winX, winY, winW, winH,
         nullptr, nullptr, instance, nullptr);
     if (!g_window)
     {
