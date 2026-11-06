@@ -13,7 +13,7 @@
 
 ; ---------- 基本信息 ----------
 !define APP_NAME      "WB2API Launcher"
-!define APP_VERSION   "1.1.0"
+!define APP_VERSION   "1.1.1"
 !define APP_PUBLISHER "MinOS-WJ"
 !define APP_EXE       "WB2APILauncher.exe"
 !define PROJECT_URL   "https://github.com/ardeyouxipianyi/workbuddy2api-hub"
